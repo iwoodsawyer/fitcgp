@@ -1,2 +1,4 @@
+[![View Gaussian Process Classifier on File Exchange](https://www.mathworks.com/matlabcentral/images/matlab-file-exchange.svg)](https://www.mathworks.com/matlabcentral/fileexchange/182870-fitcgp)
+
 # fitcgp
 Gaussian Process (GP) classifier for one-class, binary, and binomial classification. The function `fitcsvm` fits a Gaussian process model for classification. This function delegates fitting to `ClassificationGP` class. This class provides a fitrgp-style API for **binary** and **binomial** Gaussian process classification. It is intended to resemble MATLAB's `RegressionGP` and `fitrgp` interface and conventions, but implements classification via approximate inference using Laplace or Expectation Propagation (EP). Laplace approximate inference supports both binary and binomial responses, and EP supports only binary responses.
