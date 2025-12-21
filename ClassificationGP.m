@@ -35,9 +35,9 @@ classdef ClassificationGP
 %       ActiveSetVectors      - Subset of the training data needed to make predictions.
 %       FitMethod             - Method used to estimate parameters.
 %       PredictMethod         - Method used to make predictions.
-%       ActiveSetMethod       - Method used to select the active set for sparse methods.
+%       ActiveSetMethod       - Method used to select the active set.
 %       ActiveSetSize         - Size of the active set.
-%       IsActiveSetVector     - Logical vector marking the active set for sparse methods.
+%       IsActiveSetVector     - Logical vector marking the active set.
 %       LogLikelihood         - Maximized marginal log likelihood of the model.
 %       ActiveSetHistory      - History of active set selection for sparse methods.
 %       RowsUsed              - Logical index for rows used in fit. 
@@ -117,6 +117,7 @@ properties
     LogLikelihood
     ActiveSetHistory
     RowsUsed
+    HyperparameterOptimizationResults
 end
 
 properties (Access=private)
@@ -128,14 +129,6 @@ properties (Access=private)
     Standardize_ logical
     DistanceMethod_ char
     ProbitScaling_ char
-
-    % Standardized copies used for numerical work
-    XStd_
-    ActiveSetStd_
-    ActiveSetY01_
-    ActiveSetW_
-    ActiveSetMean_            % m = H*Beta on active set
-    ActiveSetBasis_           % H on active set
 end
 
 methods (Static)
@@ -199,6 +192,7 @@ methods (Static)
             args = bestArgs;
 
             % Update key model-visible selections to the optimized choices.
+            this.HyperparameterOptimizationResults = hyperOptResults;
             this.KernelFunction = args.KernelFunction;
             this.BasisFunction = args.BasisFunction;
             this.Standardize_ = args.Standardize;
@@ -217,27 +211,19 @@ methods (Static)
             this.PredictorLocation = zeros(1,size(Xraw,2));
             this.PredictorScale = ones(1,size(Xraw,2));
         end
-        this.XStd_ = Xstd;
 
         % ---- Active set selection ----
         % This provides a compute-limiting subset of training points used for
         % posterior inference and prediction (similar spirit to sparse methods).
         [XaStd, ya01, wa, isActive] = ClassificationGP.selectActiveSet(Xstd, y01, w, args);
         this.IsActiveSetVector = isActive;
-        this.ActiveSetVectors = Xraw(isActive,:);
-
-        this.ActiveSetStd_ = XaStd;
-        this.ActiveSetY01_ = ya01;
-        this.ActiveSetW_ = wa;
+        this.ActiveSetVectors = Xstd;
 
         % ---- Basis function setup ----
         % Explicit basis mean: m(x)=H(x)*Beta. This matches fitrgp style.
         Ha = ClassificationGP.basisMatrix(XaStd, args.BasisFunction);
         beta0 = ClassificationGP.ensureBetaSize(args.Beta, size(Ha,2));
         this.Beta = beta0;
-
-        this.ActiveSetBasis_ = Ha;
-        this.ActiveSetMean_ = Ha * beta0;
 
         % ---- FitMethod='none' => no hyperparameter estimation ----
         % We only run inference with the provided initial parameters.
@@ -261,7 +247,6 @@ methods (Static)
         this.BasisFunction = args.BasisFunction;
         this.Beta = args.Beta(:);
         this.KernelInformation.KernelParameters = args.KernelParameters;
-        this.ActiveSetMean_ = Ha * this.Beta;
 
         % ---- Final inference with optimized parameters ----
         [post, ll] = ClassificationGP.runInferenceFromArgs(args, XaStd, ya01, wa, Ha, this.Beta);
@@ -281,19 +266,12 @@ methods
         % removes training data arrays to reduce memory footprint while
         % keeping enough information to predict.
         compacted = this;
-        %compacted.X = []; % This MUST stay commented out or be removed.
+        compacted.X = [];
         compacted.Y = [];
         compacted.W = [];
         compacted.NumObservations = 0;
         compacted.RowsUsed = [];
-
-        compacted.XStd_ = [];
-        % compacted.ActiveSetStd_ = []; % This MUST stay commented out or be removed. 
-        % The model needs the active set vectors to predict new points.
-        compacted.ActiveSetY01_ = [];
-        compacted.ActiveSetW_ = [];
-        compacted.ActiveSetBasis_ = [];
-        compacted.ActiveSetMean_ = [];
+        compacted.HyperparameterOptimizationResults = [];
     end
 
     function [label, score, ci] = predict(this, Xnew, varargin)
@@ -310,10 +288,10 @@ methods
         % Name-value:
         %   'Alpha' : significance level in (0,1). Default 0.05 -> 95% CI.
 
-        if (size(Xnew,2) ~= size(this.X,2))
+        if (size(Xnew,2) ~= size(this.ActiveSetVectors,2))
             error('ClassificationGP:SizeMismatch', ...
                 'Number of columns in Xnew (%d) must equal columns of X (%d).', ...
-                size(Xnew,2), size(this.X,2));
+                size(Xnew,2), size(this.ActiveSetVectors,2));
         end
 
         ip = inputParser;
@@ -326,10 +304,12 @@ methods
 
         % Apply training standardization parameters
         XqStd = (Xq - this.PredictorLocation) ./ this.PredictorScale;
-        XaStd = this.ActiveSetStd_;
-        args = this.ModelParameters;
+
+        % Get active set vectors used during training
+        XaStd = this.ActiveSetVectors(this.IsActiveSetVector,:);
 
         % Cross-covariances K(X_active, X_new) and diagonal of K(X_new, X_new)
+        args = this.ModelParameters;
         Kxs = ClassificationGP.kernelMatrix(XaStd, XqStd, args) + abs(this.Lambda).*eye(size(XaStd,1));
         Kss = ClassificationGP.kernelDiag(XqStd, args);
 
@@ -420,12 +400,20 @@ methods
 
     function L = resubLoss(this, varargin)
         %RESUBLOSS Resubstitution loss (evaluate on training data).
-        L = this.loss(this.X, this.Y, varargin{:});
+        if ~isempty(this.X) && ~isempty(this.Y)
+            L = this.loss(this.X, this.Y, varargin{:});
+        else
+            error('ClassificationGP:Compact', 'Unsupported for compacted model');
+        end
     end
 
     function [label, score, ci] = resubPredict(this, varargin)
         %RESUBPREDICT Resubstitution predictions (predict on training data).
-        [label, score, ci] = this.predict(this.X, varargin{:});
+        if ~isempty(this.X)
+            [label, score, ci] = this.predict(this.X, varargin{:});
+        else
+            error('ClassificationGP:Compact', 'Unsupported for compacted model');
+        end
     end
 end
 
@@ -800,9 +788,34 @@ methods (Static, Access=private)
 
         if ~isempty(args.ActiveSet)
             as = args.ActiveSet;
-            if islogical(as)
-                isActive = as(:);
+
+            if islogical(as) || all(ismember(vec, [0 1]))
+                isActive = logical(as(:));
+                if (size(X,1) >= size(isActive,1))
+                    error('ClassificationGP:ActiveSetSizeMismatch', ...
+                        'Number of rows in ActiveSet (%d) must equal rows of X (%d).', ...
+                        size(isActive,1), size(X,1));
+                end
             else
+                as = round(as);
+                if (size(X,1) <= size(as,1))
+                    error('ClassificationGP:ActiveSetSizeMismatch', ...
+                        'Number of rows in ActiveSet (%d) must be lower or equal X (%d).', ...
+                        size(as,1), size(X,1));
+                end
+                if (numel(as) == numel(unique(as)))
+                    error('ClassificationGP:ActiveSetNotUnique', ...
+                        'ActiveSet must contain unique numbers.');
+                end
+                if (max(as) <= n)
+                    error('ClassificationGP:ActiveSetBadIdxs', ...
+                        'ActiveSet indices must be lower or equal rows of X (%d)', ...
+                        max(as), size(X,1));
+                end
+                if (any(as <= 0))
+                    error('ClassificationGP:ActiveSetBadIdxs', ...
+                        'ActiveSet indices must positive integers');
+                end
                 isActive = false(n,1);
                 isActive(as) = true;
             end
