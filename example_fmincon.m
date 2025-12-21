@@ -18,4 +18,5 @@ gpc_ard = fitcgp(X, y, 'KernelFunction', 'ardsquaredexponential');
 
 % Custom basis function
 customBasis = @(X) [ones(size(X,1),1), X, X.^2];
+
 gpc = fitcgp(X, y, 'BasisFunction', customBasis);
