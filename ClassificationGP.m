@@ -47,6 +47,7 @@ classdef ClassificationGP
 %       loss                  - Classification loss.
 %       predict               - Predicted response of this model.
 %       resubLoss             - Resubstitution classification loss.
+%       resubPredict          - Resubstitution predictions.
 %
 % ALGORITHMS:
 %   Laplace Approximation:
@@ -310,7 +311,7 @@ methods
 
         % Cross-covariances K(X_active, X_new) and diagonal of K(X_new, X_new)
         args = this.ModelParameters;
-        Kxs = ClassificationGP.kernelMatrix(XaStd, XqStd, args) + abs(this.Lambda).*eye(size(XaStd,1));
+        Kxs = ClassificationGP.kernelMatrix(XaStd, XqStd, args) + abs(this.Lambda).*speye(size(XaStd,1),size(XqStd,1));
         Kss = ClassificationGP.kernelDiag(XqStd, args);
 
         % Mean function m(x)=H(x)*Beta
@@ -528,7 +529,7 @@ methods (Static, Access=private)
         ip.addParameter('ActiveSetMethod', [], @(s) isempty(s) || ischar(s) || isstring(s));
 
         % Standardize predictors (centering/scaling)
-        ip.addParameter('Standardize', false, @(b) islogical(b) && isscalar(b));
+        ip.addParameter('Standardize', false, @(b) islogical(b) || isscalar(b));
 
         % Diagnostics
         ip.addParameter('Verbose', 0, @(v) isnumeric(v) && isscalar(v));
@@ -554,6 +555,9 @@ methods (Static, Access=private)
         args = ip.Results;
         args.X = X;
         args.Y = Y;
+
+        % Convert standardize to logical
+        args.Standardize = logical(args.Standardize);
 
         % Default FitMethod/PredictMethod heuristic similar to fitrgp
         n = size(ClassificationGP.peekN(X), 1);
@@ -1020,7 +1024,7 @@ methods (Static, Access=private)
     function [post, ll] = runInferenceFromArgs(args, XaStd, ya01, wa, Ha, beta)
         % Build K and m, then run Laplace or EP inference.
         m = Ha * beta;
-        K = ClassificationGP.kernelMatrix(XaStd, XaStd, args) + abs(args.Lambda).*eye(size(XaStd,1));
+        K = ClassificationGP.kernelMatrix(XaStd, XaStd, args) + abs(args.Lambda).*speye(size(XaStd,1));
 
         switch lower(args.InferenceMethod)
             case 'laplace'
@@ -1379,7 +1383,7 @@ methods (Static, Access=private)
 
             % Compute Newton Direction
             sW = sqrt(W);
-            B = eye(n) + (sW.*(K.*sW'));
+            B = (sW.*(K.*sW')) + speye(n);
             L = ClassificationGP.cholSafe(B);
 
             % Newton Step
@@ -1420,7 +1424,7 @@ methods (Static, Access=private)
 
         % Final quantities
         sW = sqrt(W);
-        B = eye(n) + (sW.*(K.*sW'));
+        B = (sW.*(K.*sW')) + speye(n);
         L = ClassificationGP.cholSafe(B);
 
         % Approximate log evidence
@@ -1534,7 +1538,7 @@ methods (Static, Access=private)
 
             % Recompute Sigma globally to avoid numerical drift
             sW = sqrt(tau);
-            B = eye(n) + (sW.*(K.*sW'));
+            B = (sW.*(K.*sW')) + speye(n);
             L = ClassificationGP.cholSafe(B);
             V = L\(K.*sW');
             Sigma = K - (V'*V);
@@ -1573,7 +1577,7 @@ methods (Static, Access=private)
 
         % Compute full LogZ
         sW = sqrt(tau);
-        B = eye(n) + (sW.*(K.*sW'));
+        B = (sW.*(K.*sW')) + speye(n);
         L = ClassificationGP.cholSafe(B);
         logdetB = 2*sum(log(diag(L)));
         quad = nu'*(K*nu + 2*m); 
@@ -1746,7 +1750,7 @@ methods (Static, Access=private)
         % Force positive definite
         if p
             % Force symmetry
-            I = eye(size(X,1),size(X,2));
+            I = speye(size(X,1),size(X,2));
             X = 0.5.*(X+X') + 1e-12.*I;
 
             % Compute the symmetric polar factor of X.
