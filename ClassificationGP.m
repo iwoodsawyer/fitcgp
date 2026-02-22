@@ -362,7 +362,7 @@ methods
 
         ip = inputParser;
         ip.addParameter('LossFun', 'classiferror');
-        ip.addParameter('Weights', ones(size(Y)));
+        ip.addParameter('Weights', ones(size(Y,1),1));
         ip.parse(varargin{:});
         lossFun = ip.Results.LossFun;
         w = ip.Results.Weights;
@@ -671,7 +671,7 @@ methods (Static, Access=private)
         % Convert input to categorical first
         if isnumeric(Y) && size(Y,2)==2
             % Binomial input
-            p = Y(:,1)./Y(:,2)
+            p = Y(:,1)./Y(:,2);
             w = w.*Y(:,2);
             y = p >= 0.5;
             y01 = p;
