@@ -368,7 +368,7 @@ methods
         w = ip.Results.Weights;
 
         % Validate Y against trained classes (allow partial coverage in test set)
-        yTrue = ClassificationGP.normalizeY(Y, this.Classes_);
+        [yTrue, w] = ClassificationGP.normalizeY(Y, w, this.Classes_);
         yTrueLabel = yTrue > 0.5;
 
         [labels, score] = this.predict(X);
@@ -660,19 +660,19 @@ methods (Static, Access=private)
             w = args.Weights(:);
         end
 
-        [y01, classes] = ClassificationGP.normalizeY(meta.OriginalY, []);
+        [y01, w, classes] = ClassificationGP.normalizeY(meta.OriginalY, w, []);
         meta.Classes = classes;
     end
 
-    function [y01, classes, yCat] = normalizeY(Y, expectedClasses)
+    function [y01, w, classes, yCat] = normalizeY(Y, w, expectedClasses)
         % Normalize Y to categorical with 2 classes.
         % expectedClasses: Optional. If provided, Y is validated against it.
 
         % Convert input to categorical first
         if isnumeric(Y) && size(Y,2)==2
             % Binomial input
-            s = Y(:,1); t = Y(:,2);
-            p = s ./ max(t,1);
+            p = Y(:,1)./Y(:,2)
+            w = w.*Y(:,2);
             y = p >= 0.5;
             y01 = p;
             yCat = categorical(y, [false true], {'0','1'});
