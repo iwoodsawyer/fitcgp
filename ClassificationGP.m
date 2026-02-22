@@ -389,11 +389,23 @@ methods
                 % Mapping: 0->-1, 1->1.
                 L = sum(w.*max(0,1 - (2*double(yTrueLabel) - 1).*(2.*yPredProb - 1)));
             case "quadratic"
-                % Least squares
+                % Quadratic loss
                 L = sum(w.*(yPredProb - yTrue).^2);
             case "negloglikelihood"
                 % Negative Log Likelihood
                 L = -sum(w.*(yTrue.*log(yPredProb) + (1 - yTrue).*log(1 - yPredProb)));
+            case "brier"
+                % Brier Score
+                L = sum(w.*(yPredProb - yTrue).^2)/sum(w);
+            case "crps"
+                % Continuous Ranked Probability Score (CRPS) 
+                L = sum(w.*abs(yPredProb - yTrue))/sum(w);
+            case "dss"
+                % Dawid–Sebastiani Score (DSS)
+                L = ((yPredProb - yTrue).^2);
+                varProb = max(eps(L),yPredProb.*(1 - yPredProb));
+                L = L./varProb + log(varProb);
+                L = sum(w.*L)/sum(w);
             otherwise
                 error('ClassificationGP:BadLossFun', 'Unsupported LossFun: %s', string(lossFun));
         end
