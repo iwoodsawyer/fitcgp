@@ -44,6 +44,7 @@ classdef ClassificationGP
 %
 %   ClassificationGP methods:
 %       compact               - Compact this model.
+%       criterion             - Criterion of this model for comparison.
 %       loss                  - Classification loss.
 %       predict               - Predicted response of this model.
 %       resubLoss             - Resubstitution classification loss.
@@ -234,28 +235,28 @@ methods (Static)
             this.LogLikelihood = ll;
             this.Alpha = post.alpha;
             this.ModelParameters = ClassificationGP.buildModelParameters(args, this);
-            return;
+
+        else
+            % ---- Local evidence maximization ----
+            % Optimize kernel parameters / Beta / Lambda by maximizing the approximate
+            % marginal log likelihood (Laplace/EP evidence approximation).
+            args = ClassificationGP.optimizeLocally(args, XaStd, ya01, wa, Ha);
+
+            % Copy optimized parameters back to public properties.
+            this.Lambda = args.Lambda;
+            this.KernelFunction = args.KernelFunction;
+            this.BasisFunction = args.BasisFunction;
+            this.Beta = args.Beta(:);
+            this.KernelInformation.KernelParameters = args.KernelParameters;
+
+            % ---- Final inference with optimized parameters ----
+            [post, ll] = ClassificationGP.runInferenceFromArgs(args, XaStd, ya01, wa, Ha, this.Beta);
+            this.Posterior_ = post;
+            this.LogLikelihood = ll;
+            this.Alpha = post.alpha;
+
+            this.ModelParameters = ClassificationGP.buildModelParameters(args, this);
         end
-
-        % ---- Local evidence maximization ----
-        % Optimize kernel parameters / Beta / Lambda by maximizing the approximate
-        % marginal log likelihood (Laplace/EP evidence approximation).
-        args = ClassificationGP.optimizeLocally(args, XaStd, ya01, wa, Ha);
-
-        % Copy optimized parameters back to public properties.
-        this.Lambda = args.Lambda;
-        this.KernelFunction = args.KernelFunction;
-        this.BasisFunction = args.BasisFunction;
-        this.Beta = args.Beta(:);
-        this.KernelInformation.KernelParameters = args.KernelParameters;
-
-        % ---- Final inference with optimized parameters ----
-        [post, ll] = ClassificationGP.runInferenceFromArgs(args, XaStd, ya01, wa, Ha, this.Beta);
-        this.Posterior_ = post;
-        this.LogLikelihood = ll;
-        this.Alpha = post.alpha;
-
-        this.ModelParameters = ClassificationGP.buildModelParameters(args, this);
     end
 end
 
@@ -414,7 +415,7 @@ methods
     function L = resubLoss(this, varargin)
         %RESUBLOSS Resubstitution loss (evaluate on training data).
         if ~isempty(this.X) && ~isempty(this.Y)
-            L = this.loss(this.X, this.Y, varargin{:});
+            L = this.loss(this.X, this.Y, 'Weights', this.W, varargin{:});
         else
             error('ClassificationGP:Compact', 'Unsupported for compacted model');
         end
@@ -426,6 +427,108 @@ methods
             [label, score, ci] = this.predict(this.X, varargin{:});
         else
             error('ClassificationGP:Compact', 'Unsupported for compacted model');
+        end
+    end
+
+    function C = criterion(this, varargin)
+        %CRITERION Compute model criterion (predict on training data).
+
+        % Load posterior
+        if isempty(this.Posterior_)
+            error('ClassificationGP:Compact', 'Unsupported for compacted model');
+        end
+
+        ip = inputParser;
+        ip.addParameter('CriterionFun', 'GCV');
+        ip.parse(varargin{:});
+        criterionFun = ip.Results.CriterionFun;
+
+        k_hyper = numel(this.KernelInformation.KernelParameters) + numel(this.Beta);
+        n_obs = this.NumObservations;
+        n_act = sum(this.IsActiveSetVector);
+        post = this.Posterior_;
+
+        % Predict posterior probability
+        [yTrue, w] = ClassificationGP.normalizeY(this.Y, this.W, this.Classes_);
+        [~, score, yPredCI] = this.predict(this.X);
+        yPredProb = score(:,2);
+
+        % Log Likelihood
+        L = w.*(yTrue.*log(yPredProb) + (1 - yTrue).*log(1 - yPredProb));
+
+        % Pearson Chi Squared (alternative for Log Likelyhood)
+        Chi2 = w.*((yPredProb - yTrue).^2);
+        varProb = max(eps(Chi2), yPredProb.*(1 - yPredProb));
+        Chi2 = Chi2./varProb;
+
+        switch lower(string(criterionFun))
+            case "aic"
+                % Akaike Information Criterion
+                C = 2*k_hyper - 2*sum(L);
+
+            case "aicc"
+                % Akaike Information Criterion corrected for the sample size
+                C = 2*k_hyper - 2*sum(L);
+                C = C + (2*k_hyper*(k_hyper + 1))/max(1, n_obs - k_hyper - 1);
+
+            case "bic"
+                % Bayesion Information Criterion
+                C = k_hyper*log(n_obs) - 2*sum(L);
+
+            case "caic"
+                % Consistent Akaike Information Criterion
+                C = k_hyper*(log(n_obs) + 1) - 2*sum(L);
+
+            case "gcv"
+                % Generalized Cross Validation (Pearson based)
+                % Compute Effective Degrees of Freedom
+                if strcmpi(this.Inference, 'ep')
+                    effDoF = max(0, sum(diag(post.Sigma).*post.tau(:)));
+                else
+                    effDoF = max(0, n_act - sum(sum((post.L\speye(n_act)).^2)));
+                end
+
+                % Calculate Generalized Cross-Validation
+                C = -2*sum(L)/(1 - effDoF/n_obs)^2;
+				
+            case "loocv"
+                % Leave-One-Out Cross-Validation (Pearson based, hat matrix shortcut)
+                h = zeros(n_obs, 1);
+                
+                % Compute leverage (diagonal of hat matrix)
+                if strcmpi(this.Inference, 'ep')
+                    % For EP, leverage is diag(Sigma) * tau
+                    h(this.IsActiveSetVector) = max(0, diag(post.Sigma).*post.tau(:));
+                else
+                    % For Laplace, leverage is derived from the diagonal of inv(B)
+                    % where B = post.L * post.L'
+                    h(this.IsActiveSetVector) = max(0, 1 - sum((post.L \ speye(n_act)).^2, 1)');
+                end
+  
+                % Calculate LOOCV error functionally via the pseudo-response inverse scalar
+                C = -2*sum(L./max(eps(L),(1 - h).^2));
+
+            case "waic"
+                % Widely Applicable Information Criterion
+
+                % approx Gaussian quadrature
+                gw = [0.125 0.750 0.125];
+
+                % Log-likelihood at each support point
+                LL = [w.*(yTrue.*log(yPredCI(:,1)) + (1 - yTrue).*log(1 - yPredCI(:,1))),...
+                    L, w.*(yTrue.*log(yPredCI(:,2)) + (1 - yTrue).*log(1 - yPredCI(:,2)))];
+
+                % Weighted mean log-likelihood
+                maxLL = max(LL, [], 2);
+                LPPD = maxLL + log(sum(gw.*exp(LL - maxLL), 2));
+
+                % Weighted variance
+                PWAIC = sum(gw.*(LL - sum(gw.*LL, 2)).^2, 2);
+
+                % WAIC
+                C = -2*sum(LPPD - PWAIC);
+            otherwise
+                error('ClassificationGP:BadCriterionFun', 'Unsupported CriterionFun: %s', string(criterionFun));
         end
     end
 end
@@ -560,7 +663,7 @@ methods (Static, Access=private)
         ip.addParameter('OptimizeHyperparameters', 'none');
         ip.addParameter('HyperparameterOptimizationOptions', struct(), @(s) isstruct(s));
 
-        % Optional weights (common in classifiers even if not in prompt list)
+        % Optional weights
         ip.addParameter('Weights', [], @(v) isempty(v) || (isnumeric(v) && isvector(v)));
 
         ip.parse(varargin{:});
@@ -1040,7 +1143,7 @@ methods (Static, Access=private)
 
         switch lower(args.InferenceMethod)
             case 'laplace'
-                [post, ll] = ClassificationGP.inferLaplace(K, ya01, wa, m, args.Likelihood, args.ProbitScaling, args.InferenceOptions);
+                [post, ll] = ClassificationGP.inferLaplace(K, ya01, wa, m, args.Likelihood, args.InferenceOptions);
             case 'ep'
                 if ~strcmpi(args.Likelihood,'probit')
                     error('ClassificationGP:EPRequiresProbit', 'EP inference requires Probit.');
@@ -1357,7 +1460,7 @@ methods (Static, Access=private)
         end
     end
 
-    function [post, logZ] = inferLaplace(K, y01, w, m, link, scaling, opt)
+    function [post, logZ] = inferLaplace(K, y01, w, m, link, opt)
         % inferLaplace - Laplace approximation for Binary GP Classification
         %
         % Methods:
