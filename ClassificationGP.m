@@ -395,6 +395,10 @@ methods
             case "negloglikelihood"
                 % Negative Log Likelihood
                 L = -sum(w.*(yTrue.*log(yPredProb) + (1 - yTrue).*log(1 - yPredProb)));
+				if isnumeric(Y) && size(Y,2)==2
+					% If Binomial add constant term
+					L = L + sum(gammaln(Y(:,2) + 1) + gammaln(Y(:,1) + 1) + gammaln(Y(:,2) - Y(:,1) + 1));
+				end
             case "brier"
                 % Brier Score
                 L = sum(w.*(yPredProb - yTrue).^2)/sum(w);
@@ -455,6 +459,13 @@ methods
 
         % Log Likelihood
         L = w.*(yTrue.*log(yPredProb) + (1 - yTrue).*log(1 - yPredProb));
+		if isnumeric(this.Y) && size(this.Y,2)==2
+		    % If Binomial add constant term
+		    CT = gammaln(this.Y(:,2) + 1) + gammaln(this.Y(:,1) + 1) + gammaln(this.Y(:,2) - this.Y(:,1) + 1);
+			L = L + CT;
+		else
+		    CT = 0;
+		end
 
         % Pearson Chi Squared (alternative for Log Likelyhood)
         Chi2 = w.*((yPredProb - yTrue).^2);
@@ -515,8 +526,8 @@ methods
                 gw = [0.125 0.750 0.125];
 
                 % Log-likelihood at each support point
-                LL = [w.*(yTrue.*log(yPredCI(:,1)) + (1 - yTrue).*log(1 - yPredCI(:,1))),...
-                    L, w.*(yTrue.*log(yPredCI(:,2)) + (1 - yTrue).*log(1 - yPredCI(:,2)))];
+                LL = [CT + w.*(yTrue.*log(yPredCI(:,1)) + (1 - yTrue).*log(1 - yPredCI(:,1))),...
+                    L, CT + w.*(yTrue.*log(yPredCI(:,2)) + (1 - yTrue).*log(1 - yPredCI(:,2)))];
 
                 % Weighted mean log-likelihood
                 maxLL = max(LL, [], 2);
