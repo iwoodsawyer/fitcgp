@@ -286,6 +286,24 @@ function [this, varargout] = fitcgp(X, Y, varargin)
 %                        KernelScale cannot be optimized for any of the ARD
 %                        kernels. Default: 'none'.
 %
+%       'Holdout'          - A scalar in the range (0,1) specifying the
+%                            fraction of the data to be used for testing.
+%                            You can only specify one of 'Holdout',
+%                            'KFold', or 'Leaveout'. To be used in hyper
+%                            parameter optimization.
+%
+%       'KFold'            - Number of folds to use in a cross-validated
+%                            model, a positive integer greater than 1.
+%                            Default is 10. You can only specify one of
+%                            'Holdout', 'KFold', or 'Leaveout'. To be used
+%                            in hyper parameter optimization.
+%
+%       'Leaveout'         - Logical indicator for leave-one-out cross
+%                            validation. Default is false. You can only
+%                            specify one of 'Holdout', 'KFold', or
+%                            'Leaveout'. To be used in hyper parameter
+%                            optimization.
+%
 %  [MODEL, HYPEROPTR] = FITCGP(...) returns bayesopt results (struct) when
 %  'OptimizeHyperparameters' is not 'none'. Otherwise HYPEROPTR is [].
 %

@@ -674,6 +674,11 @@ methods (Static, Access=private)
         ip.addParameter('OptimizeHyperparameters', 'none');
         ip.addParameter('HyperparameterOptimizationOptions', struct(), @(s) isstruct(s));
 
+        % Cross validation options for hyperparameter optimization
+        ip.addParameter('Holdout', [], @(v) isempty(v) || (isnumeric(v) && isscalar(v) && v>0 && v<1));
+        ip.addParameter('KFold', [], @(v) isempty(v) || (isnumeric(v) && isscalar(v) && mod(v,1)==0));
+        ip.addParameter('Leaveout', [], @(v) isempty(v) || (islogical(v) && isscalar(v)) || (isnumeric(v) && isscalar(v) && (v==0 || v==1)));
+
         % Optional weights
         ip.addParameter('Weights', [], @(v) isempty(v) || (isnumeric(v) && isvector(v)));
 
@@ -681,6 +686,12 @@ methods (Static, Access=private)
         args = ip.Results;
         args.X = X;
         args.Y = Y;
+
+        % Check CV options
+        cvOpts = [~isempty(args.Holdout), ~isempty(args.KFold), ~isempty(args.Leaveout)];
+        if sum(cvOpts) > 1
+            error('ClassificationGP:TooManyCVOptions', 'You can only specify one of ''Holdout'', ''KFold'', or ''Leaveout''.');
+        end
 
         % Convert standardize to logical
         args.Standardize = logical(args.Standardize);
@@ -1195,9 +1206,9 @@ methods (Static, Access=private)
         %
         % Each bayesopt evaluation:
         %   - applies candidate hyperparameters to args
-        %   - builds standardized/active-set data
-        %   - optionally runs local optimization
-        %   - returns Objective = -LogEvidence
+        %   - partitions the data into test/train sets
+        %   - trains the model and collects validation loss
+        %   - returns Objective = Cross validation error
 
         if exist('bayesopt','file') ~= 2
             error('ClassificationGP:NoBayesopt', 'OptimizeHyperparameters requires bayesopt.');
@@ -1239,8 +1250,26 @@ methods (Static, Access=private)
             bo.AcquisitionFunctionName = 'expected-improvement-plus';
         end
 
-        objFcn = @(T) ClassificationGP.bayesObjective(T, Xraw, y01, w, args0);
+        % Create CV partition
+        n = size(Xraw, 1);
+        if ~isempty(args0.Holdout)
+            cvp = cvpartition(y01, 'Holdout', args0.Holdout,'Stratify',numunique(y01) == 2);
+        elseif ~isempty(args0.Leaveout) && args0.Leaveout
+            cvp = cvpartition(n, 'LeaveOut');
+        elseif ~isempty(args0.KFold)
+            if ~isempty(args0.KFold) && args0.KFold > 1
+                cvp = cvpartition(y01, 'KFold', args0.KFold,'Stratify',numunique(y01) == 2);
+            else
+                cvp = [];
+            end
+        else
+            cvp = cvpartition(y01, 'KFold', 10,'Stratify',numunique(y01) == 2);
+        end
 
+        % Create objective function
+        objFcn = @(T) ClassificationGP.bayesObjective(T, Xraw, y01, w, args0, cvp);
+
+        % Perform optimization
         resultsBO = bayesopt(objFcn, vars, ...
             'MaxObjectiveEvaluations', bo.MaxObjectiveEvaluations, ...
             'Verbose', bo.Verbose, ...
@@ -1282,34 +1311,92 @@ methods (Static, Access=private)
         end
     end
 
-    function obj = bayesObjective(T, Xraw, y01, w, args0)
+    function obj = bayesObjective(T, Xraw, y01, w, args0, cvp)
         % bayesopt ObjectiveFunction:
         % return table with variable 'Objective' to minimize.
 
         args = ClassificationGP.applyBayesVarsToArgs(T, args0);
-
-        if args.Standardize
-            Xstd = ClassificationGP.standardizeX(Xraw);
+        
+        if ~isempty(cvp)
+            nFolds = cvp.NumTestSets;
         else
-            Xstd = Xraw;
+            nFolds = 1;
         end
+        valLoss = zeros(nFolds, 1);
+        
+        for i = 1:nFolds
+            if ~isempty(cvp)
+                trIdx = cvp.training(i);
+                teIdx = cvp.test(i);
+                Xtr = Xraw(trIdx, :);
+                ytr = y01(trIdx);
+                wtr = w(trIdx);
+            else
+                Xtr = Xraw;
+                ytr = y01;
+                wtr = w;
+            end
+            
+            % Standardize
+            if args.Standardize
+                [XtrStd, mu, sig] = ClassificationGP.standardizeX(Xtr);
+            else
+                XtrStd = Xtr;
+            end
+            
+            % Select active data set
+            [XaStd, ya01_a, wa] = ClassificationGP.selectActiveSet(XtrStd, ytr, wtr, args);
 
-        [XaStd, ya01, wa] = ClassificationGP.selectActiveSet(Xstd, y01, w, args);
+            % Create basis functions
+            Ha = ClassificationGP.basisMatrix(XaStd, args.BasisFunction);
+            argsTrain = args;
+            argsTrain.Beta = ClassificationGP.ensureBetaSize(argsTrain.Beta, size(Ha,2));
+            
+            % Local optimization inside each bayesopt trial.
+            if ~strcmpi(string(argsTrain.FitMethod), "none")
+                argsTrain = ClassificationGP.optimizeLocally(argsTrain, XaStd, ya01_a, wa, Ha);
+            end
+            beta = argsTrain.Beta(:);
+            [post, ll] = ClassificationGP.runInferenceFromArgs(argsTrain, XaStd, ya01_a, wa, Ha, beta);
+            
+            if ~isempty(cvp) && (size(teIdx,1) > 0)
+                Xte = Xraw(teIdx, :);
+                yte = y01(teIdx);
+                wte = w(teIdx);
+                if args.Standardize
+                    XteStd = (Xte - mu)./sig;
+                else
+                    XteStd = Xte;
+                end
 
-        Ha = ClassificationGP.basisMatrix(XaStd, args.BasisFunction);
-        args.Beta = ClassificationGP.ensureBetaSize(args.Beta, size(Ha,2));
+                % Predict on training set
+                Kxs = ClassificationGP.kernelMatrix(XaStd, XteStd, argsTrain) + abs(argsTrain.Lambda).*speye(size(XaStd,1),size(XteStd,1));
+                Kss = ClassificationGP.kernelDiag(XteStd, argsTrain);
+                Hq = ClassificationGP.basisMatrix(XteStd, argsTrain.BasisFunction);
+                mq = Hq*beta;
 
-        % Like fitrgp, allow local optimization inside each bayesopt trial.
-        if ~strcmpi(string(args.FitMethod), "none")
-            args = ClassificationGP.optimizeLocally(args, XaStd, ya01, wa, Ha);
+                switch lower(argsTrain.InferenceMethod)
+                    case 'ep'
+                        pPos = ClassificationGP.predictProbEP(post, Kxs, Kss, mq, []);
+                    otherwise
+                        pPos = ClassificationGP.predictProbLaplace(post, Kxs, Kss, mq, [], argsTrain.Likelihood, argsTrain.ProbitScaling);
+                end
+
+                % Log Likelihood
+                ll = sum(wte.*(yte.*log(pPos) + (1 - yte).*log(1 - pPos)));
+            end
+
+            % Cross validation loss
+            if ~isfinite(ll)
+                valLoss(i)  = 1e10;
+            else
+                valLoss(i)  = -ll;
+            end
         end
-
-        beta = args.Beta(:);
-        [~, ll] = ClassificationGP.runInferenceFromArgs(args, XaStd, ya01, wa, Ha, beta);
-        if ~isfinite(ll)
+        
+        obj = sum(valLoss);
+        if isnan(obj) || ~isfinite(obj)
             obj = 1e10;
-        else
-            obj = -ll;
         end
     end
 
@@ -1765,7 +1852,6 @@ methods (Static, Access=private)
                     % Fisher Information
                     W = max(w.*(phi.^2./factor),0);
                 end
-
             otherwise
                 error('ClassificationGP:BadLikelihood', 'Unsupported likelihood: %s', string(link));
         end
@@ -1789,8 +1875,6 @@ methods (Static, Access=private)
         v = post.L\(post.sW.*Kxs);
         vLatent = max(Kss(:) - sum(v.^2,1)', 0);
 
-        z = sqrt(2)*erfcinv(alphaLevel); % norminv(1-alpha/2)
-
         switch lower(string(link))
             case "probit"
                 switch lower(string(scaling))
@@ -1805,6 +1889,7 @@ methods (Static, Access=private)
                 denom = sqrt(1 + (sf^2)*vLatent)./sf;
                 pPos = ClassificationGP.normcdfSafe(mstar./denom);
                 if nargout > 1
+                    z = sqrt(2)*erfcinv(alphaLevel); % norminv(1-alpha/2)
                     mstarLo = mstar - z*sqrt(vLatent(:));
                     pLo = ClassificationGP.normcdfSafe(mstarLo./denom);
                 end
@@ -1826,6 +1911,7 @@ methods (Static, Access=private)
                 denom = sqrt(1 + (sf^2)*vLatent);
                 pPos = ClassificationGP.sigmoidSafe(mstar./denom);
                 if nargout > 1
+                    z = sqrt(2)*erfcinv(alphaLevel); % norminv(1-alpha/2)
                     mstarLo = mstar - z*sqrt(vLatent(:));
                     pLo = ClassificationGP.sigmoidSafe(mstarLo./denom);
                 end
@@ -1853,11 +1939,11 @@ methods (Static, Access=private)
         v = sum(Kxs.*(KiKxs - KiSigmaKiKxs), 1)';
         vLatent = max(Kss(:) - v, 0);
 
-        z = sqrt(2)*erfcinv(alphaLevel); % norminv(1-alpha/2)
-
         denom = sqrt(1+vLatent);
         pPos = ClassificationGP.normcdfSafe(mstar ./ denom);
+
         if nargout > 1
+            z = sqrt(2)*erfcinv(alphaLevel); % norminv(1-alpha/2)
             mstarLo = mstar - z*sqrt(vLatent(:));
             pLo = ClassificationGP.normcdfSafe(mstarLo ./ denom);
         end
