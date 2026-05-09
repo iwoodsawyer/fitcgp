@@ -312,7 +312,7 @@ methods
 
         % Cross-covariances K(X_active, X_new) and diagonal of K(X_new, X_new)
         args = this.ModelParameters;
-        Kxs = ClassificationGP.kernelMatrix(XaStd, XqStd, args) + abs(this.Lambda).*speye(size(XaStd,1),size(XqStd,1));
+        Kxs = ClassificationGP.kernelMatrix(XaStd, XqStd, args);
         Kss = ClassificationGP.kernelDiag(XqStd, args);
 
         % Mean function m(x)=H(x)*Beta
@@ -394,7 +394,7 @@ methods
                 L = sum(w.*(yPredProb - yTrue).^2);
             case "negloglikelihood"
                 % Negative Log Likelihood
-                L = -sum(w.*(yTrue.*log(yPredProb) + (1 - yTrue).*log(1 - yPredProb)));
+                L = -sum(w.*(yTrue.*log(max(yPredProb,eps)) + (1 - yTrue).*log(max(1 - yPredProb,eps))));
 				if isnumeric(Y) && size(Y,2)==2
 					% If Binomial add constant term
 					L = L + sum(gammaln(Y(:,2) + 1) + gammaln(Y(:,1) + 1) + gammaln(Y(:,2) - Y(:,1) + 1));
@@ -438,7 +438,7 @@ methods
         %CRITERION Compute model criterion (predict on training data).
 
         % Load posterior
-        if isempty(this.Posterior_)
+        if isempty(this.X) || isempty(this.Y)
             error('ClassificationGP:Compact', 'Unsupported for compacted model');
         end
 
@@ -458,7 +458,7 @@ methods
         yPredProb = score(:,2);
 
         % Log Likelihood
-        L = w.*(yTrue.*log(yPredProb) + (1 - yTrue).*log(1 - yPredProb));
+        L = w.*(yTrue.*log(max(yPredProb,eps)) + (1 - yTrue).*log(max(1 - yPredProb,eps)));
 		if isnumeric(this.Y) && size(this.Y,2)==2
 		    % If Binomial add constant term
 		    CT = gammaln(this.Y(:,2) + 1) + gammaln(this.Y(:,1) + 1) + gammaln(this.Y(:,2) - this.Y(:,1) + 1);
@@ -526,8 +526,8 @@ methods
                 gw = [0.125 0.750 0.125];
 
                 % Log-likelihood at each support point
-                LL = [CT + w.*(yTrue.*log(yPredCI(:,1)) + (1 - yTrue).*log(1 - yPredCI(:,1))),...
-                    L, CT + w.*(yTrue.*log(yPredCI(:,2)) + (1 - yTrue).*log(1 - yPredCI(:,2)))];
+                LL = [CT + w.*(yTrue.*log(max(yPredCI(:,1),eps)) + (1 - yTrue).*log(max(1 - yPredCI(:,1),eps))),...
+                    L, CT + w.*(yTrue.*log(max(yPredCI(:,2),eps)) + (1 - yTrue).*log(max(1 - yPredCI(:,2),eps)))];
 
                 % Weighted mean log-likelihood
                 maxLL = max(LL, [], 2);
@@ -550,7 +550,14 @@ methods (Static, Access=private)
 
         % Check X
         if istable(X)
-            X_numeric = table2array(X);
+            Xtbl = X;
+            if (ischar(Y) || isstring(Y)) && isscalar(string(Y)) && ...
+                 ismember(string(Y), string(X.Properties.VariableNames))
+                Xtbl.(char(string(Y))) = [];
+                Y = X.(char(string(Y)));
+            end
+            numVars = varfun(@(v) isnumeric(v) || islogical(v), Xtbl, 'OutputFormat','uniform');
+            X_numeric = table2array(Xtbl(:, numVars));
         else
             X_numeric = X;
         end
@@ -635,7 +642,7 @@ methods (Static, Access=private)
         ip.addParameter('Beta', [], @(v) isempty(v) || isnumeric(v));
 
         % Lambda
-        ip.addParameter('Lambda', 0, @(v) isempty(v) || (isnumeric(v) && isscalar(v) && v>0));
+        ip.addParameter('Lambda', 0, @(v) isempty(v) || (isnumeric(v) && isscalar(v) && v>=0));
         ip.addParameter('ConstantLambda', true, @(b) islogical(b) && isscalar(b));
 
         % ----- Inference choice (user-facing) -----
@@ -930,9 +937,9 @@ methods (Static, Access=private)
         if ~isempty(args.ActiveSet)
             as = args.ActiveSet;
 
-            if islogical(as) || all(ismember(vec, [0 1]))
+            if islogical(as) || all(ismember(as, [0 1]))
                 isActive = logical(as(:));
-                if (size(X,1) >= size(isActive,1))
+                if (size(X,1) ~= size(isActive,1))
                     error('ClassificationGP:ActiveSetSizeMismatch', ...
                         'Number of rows in ActiveSet (%d) must equal rows of X (%d).', ...
                         size(isActive,1), size(X,1));
@@ -944,17 +951,17 @@ methods (Static, Access=private)
                         'Number of rows in ActiveSet (%d) must be lower or equal X (%d).', ...
                         size(as,1), size(X,1));
                 end
-                if (numel(as) == numel(unique(as)))
+                if (numel(as) ~= numel(unique(as)))
                     error('ClassificationGP:ActiveSetNotUnique', ...
                         'ActiveSet must contain unique numbers.');
                 end
-                if (max(as) <= n)
+                if (max(as) > n)
                     error('ClassificationGP:ActiveSetBadIdxs', ...
                         'ActiveSet indices must be lower or equal rows of X (%d)', ...
                         max(as), size(X,1));
                 end
                 if (any(as <= 0))
-                    error('ClassificationGP:ActiveSetBadIdxs', ...
+                    error('ClassificationGP:ActiveSetPosInts', ...
                         'ActiveSet indices must positive integers');
                 end
                 isActive = false(n,1);
@@ -1370,7 +1377,7 @@ methods (Static, Access=private)
                 end
 
                 % Predict on training set
-                Kxs = ClassificationGP.kernelMatrix(XaStd, XteStd, argsTrain) + abs(argsTrain.Lambda).*speye(size(XaStd,1),size(XteStd,1));
+                Kxs = ClassificationGP.kernelMatrix(XaStd, XteStd, argsTrain);
                 Kss = ClassificationGP.kernelDiag(XteStd, argsTrain);
                 Hq = ClassificationGP.basisMatrix(XteStd, argsTrain.BasisFunction);
                 mq = Hq*beta;
@@ -1635,6 +1642,8 @@ methods (Static, Access=private)
                 'Maximum iterations reached without convergence');
         end
 
+        [logL, ~, W] = ClassificationGP.likelihoodMoments(f, y, w, link);
+
         % Final quantities
         sW = sqrt(W);
         B = (sW.*(K.*sW')) + speye(n);
@@ -1697,36 +1706,32 @@ methods (Static, Access=private)
                 nu_i = nu(i);
                 mu_i = mu(i);
                 y_i = y(i);
+                w_i = w(i);
 
                 % Compute Cavity Distribution
-                denom = 1 - sig_i*tau_i;
-                if abs(denom) < sqrt_eps
-                    denom = sqrt_eps*sign(denom); 
-                end
+                denom = max(1 - sig_i*tau_i,sqrt_eps);
                 var_cav = max(sig_i/denom,sqrt_eps);
                 mu_cav = (mu_i - sig_i*nu_i)/denom;
 
                 % Moment Matching (Probit)
-                denom_margin = sqrt(1 + var_cav);
+                denom_margin = max(sqrt(1 + var_cav),sqrt_eps);
                 z = (y_i*mu_cav)/denom_margin;
 
                 % Mills Ratio for stable update
                 ratio = ClassificationGP.millsRatioSafe(z);
  
-                % New moments
+                % New Moments
                 mu_hat = mu_cav + (y_i*var_cav/denom_margin)*ratio;
-                var_hat = var_cav - (var_cav^2/(1 + var_cav))*ratio.*(ratio + z);
-                var_hat = max(var_hat,sqrt_eps);
+                var_hat = max(var_cav - (var_cav^2/(1 + var_cav))*ratio*(ratio + z),sqrt_eps);
 
                 % Update Site Parameters
-                delta_tau = (1/var_hat) - (1/var_cav) - tau_i;
-                delta_nu  = (mu_hat/var_hat) - (mu_cav/var_cav) - nu_i;
+                delta_tau = w_i*((1/var_hat) - (1/var_cav)) - tau_i;
+                delta_nu  = w_i*((mu_hat/var_hat) - (mu_cav/var_cav)) - nu_i;
 
                 % Damping
                 delta_tau = delta_tau*opt.Damping;
                 delta_nu  = delta_nu*opt.Damping;
-
-                tau_new = max(tau_i + delta_tau,0);
+                tau_new = tau_i + delta_tau;
                 nu_new  = nu_i + delta_nu;
                 tau(i) = tau_new;
                 nu(i)  = nu_new;
@@ -1736,7 +1741,6 @@ methods (Static, Access=private)
                 d_nu  = nu_new - nu_i;
 
                 % Rank-1 Update of Posterior Sigma and mu
-                si = Sigma(:,i);
                 denom_update = 1 + d_tau*sig_i;
 
                 % If update is too singular, skip it
@@ -1744,7 +1748,8 @@ methods (Static, Access=private)
                     K_update_factor = d_tau/denom_update;
                     mu_update_factor = (d_nu - d_tau*mu_i)/denom_update;
 
-                    Sigma = Sigma - K_update_factor*(si*si');
+                    si = Sigma(:,i);
+                    Sigma = Sigma - (K_update_factor * si) * si';
                     mu = mu + mu_update_factor*si;
                 end
             end
@@ -1757,12 +1762,8 @@ methods (Static, Access=private)
             Sigma = K - (V'*V);
 
             % Recompute Mu
-            if norm(m) < sqrt_eps
-                mu = Sigma*nu + (m - Sigma*(tau.*m));
-            else
-                LK = ClassificationGP.cholSafe(K);
-                mu = Sigma * (nu + (LK')\(LK\m));
-            end
+            % Using stable algebraic identity: mu = Sigma * nu + m - Sigma * (tau .* m)
+            mu = Sigma * nu + m - Sigma * (tau .* m);
 
             % Check Convergence
             if (max(abs(tau - tau_old_sweep)) < opt.Tol) && (max(abs(nu - nu_old_sweep)) < opt.Tol)
@@ -1776,11 +1777,8 @@ methods (Static, Access=private)
         end
 
         % Compute Cavity Variances and Means
-        denom = 1 - diag(Sigma).*tau;
-        if abs(denom) < sqrt_eps
-            denom = sqrt_eps*sign(denom);
-        end
-        var_cav = max(diag(Sigma)./denom,sqrt_eps);
+        denom = max(1 - diag(Sigma).*tau,sqrt_eps);
+        var_cav = max(diag(Sigma)./denom,0);
         mu_cav = (mu - diag(Sigma).*nu)./denom;
 
         % Compute Moment Matching Normalization (Z_hat)
@@ -1794,10 +1792,8 @@ methods (Static, Access=private)
         L = ClassificationGP.cholSafe(B);
         logdetB = 2*sum(log(diag(L)));
         quad = nu'*(K*nu + 2*m); 
-        logZ = sum(logP) - 0.5*quad -0.5*logdetB;
-
-        LK = ClassificationGP.cholSafe(K);
-        alpha = (LK')\(LK\(mu - m));
+        logZ = sum(w.*logP) - 0.5*quad -0.5*logdetB;
+        alpha = nu - tau .* mu;
 
         post = struct();
         post.tau = tau;
@@ -1807,6 +1803,7 @@ methods (Static, Access=private)
         post.alpha = alpha;
         post.K = K;
         post.m = m;
+        post.L = L;
         post.inference = 'ep';
     end
 
@@ -1840,17 +1837,23 @@ methods (Static, Access=private)
                 % --- Probit Link ---
                 p = ClassificationGP.normcdfSafe(f); % probability
                 p = min(max(p, eps), 1-eps);
+                q = 1 - p;
 
                 if nargout > 1
                     phi = ClassificationGP.normpdfSafe(f);
-                    factor = p.*(1-p);
+                    factor = p.*q;
 
                     % Gradient
                     grad = w.*(phi./factor).*(y - p);
                 end
                 if nargout > 2
-                    % Fisher Information
-                    W = max(w.*(phi.^2./factor),0);
+                   % Fisher Information
+                   %W = max(w.*(phi.^2./factor),eps);
+
+                   % Exact Negative Hessian
+                   W1 = (phi.^2 + f.*phi.*p)./(p.^2);
+                   W0 = (phi.^2 - f.*phi.*q)./(q.^2);
+                   W = max(w.*(y.*W1 + (1 - y).*W0),eps);
                 end
             otherwise
                 error('ClassificationGP:BadLikelihood', 'Unsupported likelihood: %s', string(link));
@@ -1928,16 +1931,13 @@ methods (Static, Access=private)
         % Predictive probability using EP posterior (probit).
         %
         % Uses alpha-like mean term and an approximate latent variance computed
-        % from EP covariance.
+        % from EP covariance mapping standard Laplace prediction mechanics.
 
         mstar = mq(:) + (Kxs'*post.alpha);
 
-        LK = ClassificationGP.cholSafe(post.K);
-        KiKxs = LK'\(LK\Kxs);
-        KiSigmaKiKxs = LK'\(LK\(post.Sigma * KiKxs));
-
-        v = sum(Kxs.*(KiKxs - KiSigmaKiKxs), 1)';
-        vLatent = max(Kss(:) - v, 0);
+        sW = sqrt(post.tau);
+        v = post.L \ (sW .* Kxs);
+        vLatent = max(Kss(:) - sum(v.^2, 1)', 0);
 
         denom = sqrt(1+vLatent);
         pPos = ClassificationGP.normcdfSafe(mstar ./ denom);
@@ -2034,7 +2034,8 @@ methods (Static, Access=private)
     function X = peekN(Xin)
         % Utility: extract numeric matrix for size inference.
         if istable(Xin)
-            X = table2array(Xin);
+            numVars = varfun(@(v) isnumeric(v) || islogical(v), Xin, 'OutputFormat','uniform');
+            X = table2array(Xin(:, numVars));
         else
             X = Xin;
         end
