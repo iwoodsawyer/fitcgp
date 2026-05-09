@@ -181,6 +181,18 @@ classdef test_fitcgp < matlab.unittest.TestCase
             testCase.verifyTrue(all(isfinite(score(:))));
         end
 
+        function testInferenceEPWithWeights(testCase)
+            w = 0.5 + rand(size(testCase.X_bin,1),1);
+            mdl = fitcgp(testCase.X_bin, testCase.Y_cat, ...
+                'Inference', 'EP', ...
+                'Weights', w, ...
+                'Verbose', 0);
+            testCase.verifyEqual(lower(mdl.Inference), 'ep');
+            [~, score] = mdl.predict(testCase.X_bin(1:10,:));
+            testCase.verifyTrue(all(isfinite(score(:))));
+            testCase.verifyTrue(all(score(:) >= 0 & score(:) <= 1));
+        end
+
         function testInferenceLogitVsProbitDiffer(testCase)
             opts = {'Verbose',0};
             Xte  = testCase.X_bin(1:20,:);

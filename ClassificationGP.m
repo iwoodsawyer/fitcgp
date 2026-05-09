@@ -1678,6 +1678,7 @@ methods (Static, Access=private)
 
         n = size(K,1);
         y = double(y01(:));
+        w = w(:);
         y = 2*(y > 0.5) - 1; % Convert to -1/+1
         if isempty(m)
             m = zeros(n,1);
