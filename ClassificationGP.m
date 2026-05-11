@@ -395,10 +395,10 @@ methods
             case "negloglikelihood"
                 % Negative Log Likelihood
                 L = -sum(w.*(yTrue.*log(max(yPredProb,eps)) + (1 - yTrue).*log(max(1 - yPredProb,eps))));
-				if isnumeric(Y) && size(Y,2)==2
-					% If Binomial add constant term
-					L = L + sum(gammaln(Y(:,2) + 1) + gammaln(Y(:,1) + 1) + gammaln(Y(:,2) - Y(:,1) + 1));
-				end
+                if isnumeric(Y) && size(Y,2)==2
+                    % If Binomial add constant term
+                    L = L + sum(gammaln(Y(:,2) + 1) + gammaln(Y(:,1) + 1) + gammaln(Y(:,2) - Y(:,1) + 1));
+                end
             case "brier"
                 % Brier Score
                 L = sum(w.*(yPredProb - yTrue).^2)/sum(w);
@@ -459,13 +459,13 @@ methods
 
         % Log Likelihood
         L = w.*(yTrue.*log(max(yPredProb,eps)) + (1 - yTrue).*log(max(1 - yPredProb,eps)));
-		if isnumeric(this.Y) && size(this.Y,2)==2
-		    % If Binomial add constant term
-		    CT = gammaln(this.Y(:,2) + 1) + gammaln(this.Y(:,1) + 1) + gammaln(this.Y(:,2) - this.Y(:,1) + 1);
-			L = L + CT;
-		else
-		    CT = 0;
-		end
+        if isnumeric(this.Y) && size(this.Y,2)==2
+            % If Binomial add constant term
+            CT = gammaln(this.Y(:,2) + 1) + gammaln(this.Y(:,1) + 1) + gammaln(this.Y(:,2) - this.Y(:,1) + 1);
+            L = L + CT;
+        else
+            CT = 0;
+        end
 
         % Pearson Chi Squared (alternative for Log Likelyhood)
         Chi2 = w.*((yPredProb - yTrue).^2);
@@ -501,7 +501,7 @@ methods
 
                 % Calculate Generalized Cross-Validation
                 C = -2*sum(L)/(1 - effDoF/n_obs)^2;
-				
+                
             case "loocv"
                 % Leave-One-Out Cross-Validation (Pearson based, hat matrix shortcut)
                 h = zeros(n_obs, 1);
@@ -1679,133 +1679,119 @@ methods (Static, Access=private)
         n = size(K,1);
         y = double(y01(:));
         w = w(:);
-        y = 2*(y > 0.5) - 1; % Convert to -1/+1
+        y = 2*(y > 0.5) - 1; % Convert 0/1 labels to -1/+1
         if isempty(m)
             m = zeros(n,1);
         end
 
-        % Initialize Sites
-        tau = zeros(n,1);
-        nu  = zeros(n,1);
+        % Initialize Sites (Gaussian approximations to likelihood)
+        tau = zeros(n,1); % Site precisions
+        nu  = zeros(n,1); % Site precision-mean products
 
-        % Initialize Posterior (Sigma = K, mu = m)
+        % Initialize Posterior (Starts as Prior)
         Sigma = K;
         mu = m;
 
-        % Loop Sweeps
+        % Iteration Settings
         sqrt_eps = sqrt(eps);
         for it = 1:opt.MaxIter
             tau_old_sweep = tau;
             nu_old_sweep = nu;
             
-            % Randomize order for better convergence
-            perm = 1:n;%randperm(n);
+            % 1. Randomizing order improves stability and prevents local oscillations
+            perm = randperm(n); 
 
             for i = perm
                 sig_i = Sigma(i,i);
-                tau_i = tau(i);
-                nu_i = nu(i);
-                mu_i = mu(i);
-                y_i = y(i);
-                w_i = w(i);
+                
+                % 2. Cavity Distribution (Divide Posterior by Site i)
+                % precision_cav = precision_post - site_precision
+                denom = max(1 - sig_i*tau(i), sqrt_eps);
+                var_cav = max(sig_i / denom, sqrt_eps);
+                mu_cav = (mu(i) - sig_i*nu(i)) / denom;
 
-                % Compute Cavity Distribution
-                denom = max(1 - sig_i*tau_i,sqrt_eps);
-                var_cav = max(sig_i/denom,sqrt_eps);
-                mu_cav = (mu_i - sig_i*nu_i)/denom;
-
-                % Moment Matching (Probit)
-                denom_margin = max(sqrt(1 + var_cav),sqrt_eps);
-                z = (y_i*mu_cav)/denom_margin;
-
-                % Mills Ratio for stable update
+                % 3. Moment Matching (Probit Likelihood)
+                denom_margin = sqrt(1 + var_cav);
+                z = (y(i)*mu_cav) / denom_margin;
+                
+                % Mills Ratio (N/Phi) for stable gradient
                 ratio = ClassificationGP.millsRatioSafe(z);
  
-                % New Moments
-                mu_hat = mu_cav + (y_i*var_cav/denom_margin)*ratio;
-                var_hat = max(var_cav - (var_cav^2/(1 + var_cav))*ratio*(ratio + z),sqrt_eps);
+                % Target moments of (Cavity * Likelihood)
+                mu_hat = mu_cav + (y(i)*var_cav/denom_margin) * ratio;
+                var_hat = max(var_cav - (var_cav^2/(1 + var_cav)) * ratio * (ratio + z), sqrt_eps);
 
-                % Update Site Parameters
-                delta_tau = w_i*((1/var_hat) - (1/var_cav)) - tau_i;
-                delta_nu  = w_i*((mu_hat/var_hat) - (mu_cav/var_cav)) - nu_i;
+                % 4. Update Site Parameters with CLAMPING and DAMPING
+                % Fix: Corrected variable name from nu_nu to nu
+                delta_tau = w(i)*((1/var_hat) - (1/var_cav)) - tau(i);
+                delta_nu  = w(i)*((mu_hat/var_hat) - (mu_cav/var_cav)) - nu(i);
 
-                % Damping
-                delta_tau = delta_tau*opt.Damping;
-                delta_nu  = delta_nu*opt.Damping;
-                tau_new = tau_i + delta_tau;
-                nu_new  = nu_i + delta_nu;
-                tau(i) = tau_new;
-                nu(i)  = nu_new;
-
-                % Recompute deltas based on clamped values
-                d_tau = tau_new - tau_i;
-                d_nu  = nu_new - nu_i;
-
-                % Rank-1 Update of Posterior Sigma and mu
-                denom_update = 1 + d_tau*sig_i;
+                % Damping helps convergence in non-log-concave regions
+                tau_new = max(tau(i) + delta_tau * opt.Damping, 0); 
+                nu_new  = nu(i) + delta_nu * opt.Damping;
+                
+                % 5. Sequential Rank-1 Update of Posterior
+                dt = tau_new - tau(i);
+                dn = nu_new - nu(i);
+                up_denom = 1 + dt*sig_i;
 
                 % If update is too singular, skip it
-                if abs(denom_update) > sqrt_eps
-                    K_update_factor = d_tau/denom_update;
-                    mu_update_factor = (d_nu - d_tau*mu_i)/denom_update;
+                if abs(up_denom) > sqrt_eps
+                    K_fact = dt / up_denom;
+                    mu_fact = (dn - dt*mu(i)) / up_denom;
 
                     si = Sigma(:,i);
-                    Sigma = Sigma - (K_update_factor * si) * si';
-                    mu = mu + mu_update_factor*si;
+                    Sigma = Sigma - (K_fact * si) * si';
+                    mu = mu + mu_fact*si;
+                    
+                    tau(i) = tau_new;
+                    nu(i)  = nu_new;
                 end
             end
 
-            % Recompute Sigma globally to avoid numerical drift
+            % 6. Recompute globally to purge numerical drift from rank-1 updates.
             sW = sqrt(tau);
             B = (sW.*(K.*sW')) + speye(n);
             L = ClassificationGP.cholSafe(B);
-            V = L\(K.*sW');
-            Sigma = K - (V'*V);
-
-            % Recompute Mu
-            % Using stable algebraic identity: mu = Sigma * nu + m - Sigma * (tau .* m)
+            
+            % Scale ROWS of K (sW.*K) ensures symmetric Sigma_new
+            V = L \ (sW .* K); 
+            Sigma = K - (V' * V);
+            
+            % Recompute mu using the corrected stable identity
             mu = Sigma * nu + m - Sigma * (tau .* m);
 
             % Check Convergence
-            if (max(abs(tau - tau_old_sweep)) < opt.Tol) && (max(abs(nu - nu_old_sweep)) < opt.Tol)
-                break;
+            if max(abs(tau - tau_old_sweep)) < opt.Tol && max(abs(nu - nu_old_sweep)) < opt.Tol
+                break; 
             end
         end
 
-        if (it==opt.MaxIter)
+        if (it == opt.MaxIter)
             warning('ClassificationGP:MaxIterReached', ...
                 'Maximum iterations reached without convergence');
         end
 
-        % Compute Cavity Variances and Means
-        denom = max(1 - diag(Sigma).*tau,sqrt_eps);
-        var_cav = max(diag(Sigma)./denom,0);
-        mu_cav = (mu - diag(Sigma).*nu)./denom;
+        % 7. Recompute cavity one last time using final stable posterior
+        diag_S = diag(Sigma);
+        var_cav_f = max(diag_S ./ (1 - diag_S .* tau), sqrt_eps);
+        mu_cav_f  = (mu - diag_S .* nu) ./ (1 - diag_S .* tau);
+        
+        z_f = (y .* mu_cav_f) ./ sqrt(1 + var_cav_f);
+        logP_sites = sum(w .* log(ClassificationGP.normcdfSafe(z_f)));
 
-        % Compute Moment Matching Normalization (Z_hat)
-        denom_margin = sqrt(1 + var_cav);
-        z = (y.*mu_cav)./denom_margin;
-        logP = log(ClassificationGP.normcdfSafe(z));
-
-        % Compute full LogZ
-        sW = sqrt(tau);
-        B = (sW.*(K.*sW')) + speye(n);
-        L = ClassificationGP.cholSafe(B);
+        % Log-determinant of (I + S^1/2 K S^1/2)
         logdetB = 2*sum(log(diag(L)));
-        quad = nu'*(K*nu + 2*m); 
-        logZ = sum(w.*logP) - 0.5*quad -0.5*logdetB;
+        
+        % Full Evidence (accounts for prior mean m)
+        % Terms: Site log-integrals - Complexity - Cavity/Prior Energy
+        logZ = logP_sites - 0.5*logdetB + 0.5*nu'*(Sigma*nu - 2*Sigma*(tau.*m)) ...
+            - 0.5*sum( (tau.*(mu_cav_f - m).^2) ./ (1 + tau.*var_cav_f) );
+
+        % Alpha used for predictions: alpha = K^-1 * (mu - m)
         alpha = nu - tau .* mu;
 
-        post = struct();
-        post.tau = tau;
-        post.nu = nu;
-        post.Sigma = Sigma;
-        post.mu = mu;
-        post.alpha = alpha;
-        post.K = K;
-        post.m = m;
-        post.L = L;
-        post.inference = 'ep';
+        post = struct('tau',tau, 'nu',nu, 'Sigma',Sigma, 'mu',mu, 'alpha',alpha, 'K',K, 'm',m, 'L',L, 'inference','ep');
     end
 
     function [logp, grad, W, p] = likelihoodMoments(f, y, w, link)
